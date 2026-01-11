@@ -1,140 +1,223 @@
 import streamlit as st
-from PIL import Image
 import pandas as pd
-from ocr_utils import ocr_image
-import pytesseract
-import shutil
-import os
-from parser import parse_holdings
 import plotly.express as px
 
-st.set_page_config(layout='wide', page_title='Holdings Analyzer')
+# --------------------------------
+# Page config
+# --------------------------------
+st.set_page_config(
+    page_title="Portfolio Intelligence Dashboard",
+    layout="wide"
+)
 
-st.title('Holdings Analyzer — Prototype')
+st.title("📊 Portfolio Intelligence Dashboard")
 
-# Tesseract detection + override in sidebar
-def _detect_tesseract_path():
-    cmd = getattr(pytesseract.pytesseract, 'tesseract_cmd', None)
-    if cmd and os.path.exists(cmd):
-        return cmd
-    path = shutil.which('tesseract')
-    return path
+st.markdown("""
+A **CSV-based portfolio analytics tool** that evaluates profit/loss,
+allocation, diversification, concentration risk, and rebalancing insights.
+""")
 
-detected_path = _detect_tesseract_path()
-st.sidebar.header('Tesseract OCR')
-if detected_path:
-    st.sidebar.success('Detected: ' + detected_path)
+# --------------------------------
+# Sidebar: CSV Upload
+# --------------------------------
+st.sidebar.header("📂 Upload Holdings CSV")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload CSV file",
+    type=["csv"]
+)
+
+sample_df = pd.DataFrame({
+    "symbol": ["TCS", "INFY", "RELIANCE"],
+    "quantity": [15, 20, 10],
+    "avg_price": [3200, 1350, 2100],
+    "current_price": [3650, 1480, 2950]
+})
+
+st.sidebar.download_button(
+    "⬇ Download Sample CSV",
+    sample_df.to_csv(index=False),
+    file_name="sample_holdings.csv",
+    mime="text/csv"
+)
+
+if uploaded_file is None:
+    st.info("⬅ Upload a CSV file to begin analysis.")
+    st.stop()
+
+# --------------------------------
+# Load & Validate CSV
+# --------------------------------
+df = pd.read_csv(uploaded_file)
+df.columns = [c.lower().strip() for c in df.columns]
+
+required_cols = {"symbol", "quantity", "avg_price", "current_price"}
+if not required_cols.issubset(df.columns):
+    st.error("CSV must contain: symbol, quantity, avg_price, current_price")
+    st.stop()
+
+df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
+df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0).astype(int)
+df["avg_price"] = pd.to_numeric(df["avg_price"], errors="coerce").fillna(0.0)
+df["current_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(0.0)
+
+df = df[df["quantity"] > 0]
+
+if df.empty:
+    st.warning("No valid holdings found.")
+    st.stop()
+
+# --------------------------------
+# Core Calculations
+# --------------------------------
+df["invested_value"] = df["quantity"] * df["avg_price"]
+df["current_value"] = df["quantity"] * df["current_price"]
+
+df["pnl"] = df["current_value"] - df["invested_value"]
+df["pnl_pct"] = (df["pnl"] / df["invested_value"]) * 100
+
+total_invested = df["invested_value"].sum()
+total_current = df["current_value"].sum()
+total_pnl = total_current - total_invested
+total_pnl_pct = (total_pnl / total_invested) * 100
+
+df["allocation_pct"] = (df["current_value"] / total_current) * 100
+df_sorted = df.sort_values("current_value", ascending=False).reset_index(drop=True)
+
+# --------------------------------
+# Core Risk Metrics (DEFINE FIRST!)
+# --------------------------------
+hhi = (df["allocation_pct"] / 100).pow(2).sum()
+effective_n = int(1 / hhi)
+
+# --------------------------------
+# Portfolio Health Score
+# --------------------------------
+# 1️⃣ Concentration
+if hhi < 0.10:
+    concentration_score = 100
+elif hhi < 0.18:
+    concentration_score = 70
 else:
-    st.sidebar.warning('Tesseract not found')
+    concentration_score = 40
 
-custom_path = st.sidebar.text_input('Tesseract path override', value=detected_path or '')
-if st.sidebar.button('Set Tesseract path'):
-    if custom_path:
-        pytesseract.pytesseract.tesseract_cmd = custom_path
-        st.sidebar.success('Path set; please re-run OCR upload.')
-    else:
-        st.sidebar.error('Provide a valid path before setting.')
-
-st.markdown('Upload a screenshot of your holdings statement; the app will attempt to extract holdings and show a simple dashboard.')
-
-uploaded = st.file_uploader('Upload screenshot', type=['png','jpg','jpeg'])
-
-# OCR options
-st.sidebar.header('OCR options')
-psm = st.sidebar.selectbox('Tesseract PSM (page segmentation mode)', options=['3','6','11'], index=1)
-preprocess_opt = st.sidebar.checkbox('Run preprocessing (deskew, denoise)', value=True)
-show_pre = st.sidebar.checkbox('Show preprocessed image', value=False)
-
-if uploaded is not None:
-    image = Image.open(uploaded).convert('RGB')
-    st.image(image, caption='Uploaded screenshot', use_column_width=True)
-
-    with st.spinner('Running OCR...'):
-        try:
-            if show_pre:
-                text, pre_img = ocr_image(image, psm=int(psm), preprocess=preprocess_opt, return_image=True)
-            else:
-                text = ocr_image(image, psm=int(psm), preprocess=preprocess_opt)
-        except pytesseract.TesseractNotFoundError:
-            st.error('Tesseract OCR not found on this machine.')
-            st.markdown('''
-Install Tesseract and ensure it's on your PATH, or set the path in code:
-
-- Chocolatey (Windows, run PowerShell as Admin):
-
-```powershell
-choco install tesseract -y
-```
-
-- Or download installer from the releases page: https://github.com/tesseract-ocr/tesseract/releases
-
-After installing, restart your terminal and re-run the app. Alternatively set the path in Python:
-
-```python
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-```
-''')
-            st.stop()
-        except pytesseract.TesseractError as e:
-            st.error('Tesseract failed to initialize: ' + str(e))
-            st.markdown('''
-Common fixes:
-
-- Make sure the `tessdata` folder exists next to your `tesseract.exe` and contains language files like `eng.traineddata`.
-- Set `TESSDATA_PREFIX` to the parent directory of `tessdata` (example below).
-
-PowerShell (session only):
-```powershell
-$env:TESSDATA_PREFIX = 'C:\\Program Files\\Tesseract-OCR'
-```
-
-PowerShell (permanent):
-```powershell
-setx TESSDATA_PREFIX "C:\\Program Files\\Tesseract-OCR"
-```
-
-Or set in Python before OCR:
-```python
-import os
-os.environ['TESSDATA_PREFIX'] = r"C:\\Program Files\\Tesseract-OCR"
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-```
-''')
-            st.stop()
-
-    st.subheader('OCR text (preview)')
-    st.text_area('OCR', value=text, height=200)
-
-    if show_pre:
-        st.subheader('Preprocessed image')
-        st.image(pre_img, use_column_width=True)
-
-    st.subheader('Parsed holdings (heuristic)')
-    df = parse_holdings(text)
-
-    if df.empty:
-        st.warning('No structured holdings found. Try a clearer screenshot or crop to the holdings table.')
-    else:
-        st.dataframe(df)
-
-        # Basic analysis
-        total_value = df['value'].sum()
-        if total_value == 0:
-            st.info('Values not extracted; showing quantities only.')
-        else:
-            df['pct'] = df['value'] / total_value * 100
-            fig = px.pie(df, names='symbol', values='value', title='Portfolio allocation')
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Simple suggestions
-            st.subheader('Suggestions')
-            overweight = df[df['pct'] > 50]
-            if not overweight.empty:
-                st.markdown('- **Diversify:** large allocation in ' + ', '.join(overweight['symbol'].tolist()))
-            else:
-                st.markdown('- Allocation looks reasonably diversified (no single holding >50%)')
-
+# 2️⃣ Diversification
+if effective_n >= 50:
+    diversification_score = 100
+elif effective_n >= 30:
+    diversification_score = 80
+elif effective_n >= 15:
+    diversification_score = 60
 else:
-    st.info('Upload a screenshot to begin.')
+    diversification_score = 40
+
+# 3️⃣ Fragmentation
+micro_count = len(df[df["allocation_pct"] < 0.1])
+if micro_count < 20:
+    fragmentation_score = 100
+elif micro_count < 50:
+    fragmentation_score = 70
+else:
+    fragmentation_score = 40
+
+# 4️⃣ Top-5 dominance
+top5_pct = df_sorted.head(5)["allocation_pct"].sum()
+if top5_pct < 40:
+    dominance_score = 100
+elif top5_pct < 60:
+    dominance_score = 70
+else:
+    dominance_score = 40
+
+portfolio_health_score = round(
+    0.30 * concentration_score +
+    0.30 * diversification_score +
+    0.20 * fragmentation_score +
+    0.20 * dominance_score
+)
+
+# --------------------------------
+# Summary Cards
+# --------------------------------
+st.subheader("📌 Portfolio Summary")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Invested", f"₹ {total_invested:,.0f}")
+c2.metric("Current Value", f"₹ {total_current:,.0f}")
+c3.metric("Total P/L", f"₹ {total_pnl:,.0f}", f"{total_pnl_pct:.2f}%")
+c4.metric(
+    "Largest Holding",
+    f"{df_sorted.loc[0, 'symbol']} ({df_sorted.loc[0, 'allocation_pct']:.2f}%)"
+)
+
+st.subheader("🧠 Portfolio Health Score")
+st.metric("Health Score (0–100)", portfolio_health_score)
+
+if portfolio_health_score >= 80:
+    st.success("Excellent portfolio health")
+elif portfolio_health_score >= 60:
+    st.warning("Moderate portfolio health — some improvements possible")
+else:
+    st.error("Poor portfolio health — rebalancing recommended")
+
+# --------------------------------
+# Allocation Chart
+# --------------------------------
+st.subheader("🥧 Portfolio Allocation (Top 10 + Others)")
+
+TOP_N = 10
+top_df = df_sorted.head(TOP_N)
+others_value = df_sorted.iloc[TOP_N:]["current_value"].sum()
+
+if others_value > 0:
+    plot_df = pd.concat([
+        top_df[["symbol", "current_value"]],
+        pd.DataFrame({"symbol": ["OTHERS"], "current_value": [others_value]})
+    ])
+else:
+    plot_df = top_df[["symbol", "current_value"]]
+
+fig = px.pie(
+    plot_df,
+    names="symbol",
+    values="current_value",
+    title="Top Holdings Contribution"
+)
+st.plotly_chart(fig, use_container_width=True)
+
+# --------------------------------
+# Buy / Hold / Reduce Suggestions
+# --------------------------------
+st.subheader("🔄 Buy / Hold / Reduce Suggestions")
+
+MIN_TARGET = 0.5
+MAX_TARGET = 8.0
+
+buy_df = df[(df["allocation_pct"] < MIN_TARGET) & (df["pnl_pct"] > 0)]
+hold_df = df[(df["allocation_pct"] >= MIN_TARGET) & (df["allocation_pct"] <= MAX_TARGET)]
+reduce_df = df[(df["allocation_pct"] > MAX_TARGET) & (df["pnl_pct"] > 15)]
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    st.markdown("### 🟢 Buy / Add More")
+    for s in buy_df.sort_values("allocation_pct").head(5)["symbol"]:
+        st.write(f"• {s}")
+
+with c2:
+    st.markdown("### 🟡 Hold")
+    for s in hold_df.sort_values("allocation_pct", ascending=False).head(5)["symbol"]:
+        st.write(f"• {s}")
+
+with c3:
+    st.markdown("### 🔴 Reduce / Trim")
+    for s in reduce_df.sort_values("allocation_pct", ascending=False).head(5)["symbol"]:
+        st.write(f"• {s}")
+
+# --------------------------------
+# Disclaimer
+# --------------------------------
+st.caption(
+    "⚠ Disclaimer: All insights are rule-based portfolio analytics. "
+    "This is not financial advice."
+)
